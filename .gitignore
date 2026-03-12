@@ -92,3 +92,9 @@ steps/__pycache__/
 PACKAGE_INSTALLATION.md
 PyPI.md
 adc/*
+
+# copilot specific
+.github/
+
+# IMS Requirement
+ims/
