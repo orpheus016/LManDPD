@@ -98,3 +98,6 @@ adc/*
 
 # IMS Requirement
 ims/
+
+# venv
+.venv/
