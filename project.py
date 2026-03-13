@@ -161,6 +161,12 @@ class Project:
             raise FileNotFoundError(f"spec.json not found for dataset: {self.dataset_name}")
         
         if spec:
+            # Backward compatibility for legacy spec keys
+            # if 'bw_main_ch' not in spec and 'input_signal_bw' in spec:
+            #     spec['bw_main_ch'] = spec['input_signal_bw']
+            # if 'bw_sub_ch' not in spec and 'input_signal_sub_ch_bw' in spec:
+            #     spec['bw_sub_ch'] = spec['input_signal_sub_ch_bw']
+
             for k, v in spec.items():
                 setattr(self, k, v)
                 self.hparams[k] = v
