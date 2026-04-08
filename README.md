@@ -141,6 +141,12 @@ Command line for validation with quantization:
 python main.py --dataset_name DPA_200MHz --step run_dpd --accelerator cpu --DPD_backbone qgru --quant --n_bits_w 16 --n_bits_a 16 --quant_dir_label ${label_for_quantized_model}
 ```
 
+To compare **PA output after DPD** (not raw DPD output), run:
+```bash
+bash bash_scripts/compare_dpd_transfer.sh
+```
+This computes NMSE/EVM/ACLR on `PA(DPD(x))` and saves summary/plots to `dpd_out/analysis/dpa_after_dpd_transfer_200_to_100_160/`.
+
 ## Enhanced Visualization with Rich Tables
 
 OpenDPD features advanced progress visualization using Rich tables, displaying training metrics in an organized, colorful format:
