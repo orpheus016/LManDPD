@@ -6,26 +6,22 @@ N_samples = 100000;      % Number of samples for extraction (max 1,000,000)
 
 %% 1. Baseband Signal Generation: Dual-Band OFDM Scenario
 % IMS SDC compliance: 5G NR-like OFDM, 30 kHz SCS.
-N_fft = 1024;            % FFT size (yields 30 kHz subcarrier spacing)
-N_RB = 51;               % Number of Resource Blocks for ~20 MHz
-N_sc = N_RB * 12;        % Total active subcarriers (612)
-cp_len = 72;             % Cyclic prefix length
-M = 64;                  % 64-QAM
+N_fft = 1024;            
+N_RB = 51;               
+N_sc = N_RB * 12;        
+cp_len = 72;             
+M = 64;                  
 
-% Frequency Plan (Adjusted to keep IM3 within [-80, 80] MHz)
-fc1 = -15e6;             % Desired Signal Carrier
-fc2 = 15e6;              % Interferer Carrier
+fc1 = -15e6;             
+fc2 = 15e6;              
 
-% Calculate required symbols to prevent memory waste
 samples_per_sym = N_fft + cp_len;
 bb_samples_needed = ceil(N_samples * (fs_bb / fs_weblab));
 N_symbols = ceil(bb_samples_needed / samples_per_sym);
 
-% Pre-allocate baseband arrays
 bb1 = zeros(samples_per_sym * N_symbols, 1);
 bb2 = zeros(samples_per_sym * N_symbols, 1);
 
-% Generate OFDM Symbols
 for k = 1:N_symbols
     data1 = qammod(randi([0 M-1], N_sc, 1), M, 'UnitAveragePower', true);
     data2 = qammod(randi([0 M-1], N_sc, 1), M, 'UnitAveragePower', true);
@@ -49,27 +45,31 @@ for k = 1:N_symbols
     bb2(idx_start:idx_end) = tx_sym2;
 end
 
-% Resample to WebLab rate (200 MHz)
 [P, Q] = rat(fs_weblab / fs_bb);
 bb1_resamp = resample(bb1, P, Q);
 bb2_resamp = resample(bb2, P, Q);
 
-% Digital Frequency Shift
+% Digital Frequency Shift (Pre-frequency shift technique)
 len = length(bb1_resamp);
 t = (0:len-1)' / fs_weblab;
-signal1 = bb1_resamp .* exp(1i * 2 * pi * fc1 * t);
-signal2 = bb2_resamp .* exp(1i * 2 * pi * fc2 * t);
 
-% Combine signals and enforce exact length
-x_orig = signal1 + signal2;
-x_orig = x_orig(1:N_samples);
+% Generate isolated pre-frequency shifted baseband signals: x'_b(n)
+x1_prime = bb1_resamp .* exp(1i * 2 * pi * fc1 * t);
+x2_prime = bb2_resamp .* exp(1i * 2 * pi * fc2 * t);
 
-% Dynamic Power Scaling to satisfy WebLab Constraints
-PAPR_orig = 20*log10(max(abs(x_orig))*sqrt(length(x_orig))/norm(x_orig));
-target_RMSin = min(-8 - PAPR_orig, -8 - PAPR_orig*0.77) - 0.5;
+x1_prime = x1_prime(1:N_samples);
+x2_prime = x2_prime(1:N_samples);
 
-% Normalize peak to 1
-x_orig = x_orig / max(abs(x_orig));
+% Combine signals strictly to drive the physical PA measurement
+x_orig = x1_prime + x2_prime;
+
+% Dynamic Power Scaling
+peak_val = max(abs(x_orig));
+x_orig = x_orig / peak_val;
+
+% Scale isolated signals by the exact same scalar to maintain amplitude ratios
+x1_prime = x1_prime / peak_val;
+x2_prime = x2_prime / peak_val;
 
 %% 2. Baseline PA Measurement (Without DPD)
 disp('Executing Pass 1: Baseline Measurement...');
@@ -81,9 +81,8 @@ if isempty(y_base)
     error('Measurement failed. Check power limits or network connection.');
 end
 
-%% 3. Synchronization (Time Alignment)
-% Critical Step: The WebLab starts sampling randomly. The PA output (y_base)
-% must be time-aligned with the input (x_orig) before model extraction.
+%% 3. Synchronization (Time Alignment) & Initialization
+% Derive bulk delay using the composite signal to preserve inter-band phase
 [c, lags] = xcorr(y_base, x_orig);
 [~, max_idx] = max(abs(c));
 delay = lags(max_idx);
@@ -91,21 +90,28 @@ delay = lags(max_idx);
 if delay > 0
     y_aligned = y_base(delay+1:end);
     x_aligned = x_orig(1:end-delay);
+    x1_prime_aligned = x1_prime(1:end-delay);
+    x2_prime_aligned = x2_prime(1:end-delay);
 elseif delay < 0
     y_aligned = y_base(1:end+delay);
     x_aligned = x_orig(-delay+1:end);
+    x1_prime_aligned = x1_prime(-delay+1:end);
+    x2_prime_aligned = x2_prime(-delay+1:end);
 else
     y_aligned = y_base;
     x_aligned = x_orig;
+    x1_prime_aligned = x1_prime;
+    x2_prime_aligned = x2_prime;
 end
 
-% Truncate to ensure equal lengths for matrix operations
 min_len = min(length(x_aligned), length(y_aligned));
-x_aligned = x_aligned(1:min_len);
 y_aligned = y_aligned(1:min_len);
+x_aligned = x_aligned(1:min_len);
+x1_prime_aligned = x1_prime_aligned(1:min_len);
+x2_prime_aligned = x2_prime_aligned(1:min_len);
 
 % Gain and Phase Normalization for Extraction
-G_lin = y_aligned \ x_aligned; % Linear gain estimation
+G_lin = y_aligned \ x_aligned;
 y_norm = y_aligned * G_lin;
 
 %% ========================================================================
@@ -116,10 +122,189 @@ y_norm = y_aligned * G_lin;
 %  or pass them into your MATLAB neural network inference function here.
 % ========================================================================
 
-% Step A & B: Load weights and run DeltaGRU DPD
-mat_file = 'DPD_S_0_M_DELTAGRU_TCNSKIP_H_15_F_200_P_999_THX_0_010_THH_0_050.mat';
-w = load(mat_file);
-x_pd = dpd_deltagru_infer(y_norm, w);
+% MB-BAPS DPD Extraction: Basis-Function Search
+% Configuration for Search
+%% MB-BAPS DPD Extraction: Band 1
+R = 24; M_max = 2; B = 2;
+
+% 1. Downconvert, Filter, and RE-UPCONVERT to isolate the IF signals
+y1_bb = y_norm .* exp(-1i * 2 * pi * fc1 * t(1:length(y_norm)));
+y2_bb = y_norm .* exp(-1i * 2 * pi * fc2 * t(1:length(y_norm)));
+
+d_filt_ext = designfilt('lowpassfir', 'PassbandFrequency', 10e6, ...
+    'StopbandFrequency', 15e6, 'SampleRate', fs_weblab);
+
+y1_bb_filt = filtfilt(d_filt_ext, y1_bb);
+y2_bb_filt = filtfilt(d_filt_ext, y2_bb);
+
+% Re-upconvert to IF to satisfy the pre-frequency shift requirement
+y1_prime_shifted = y1_bb_filt .* exp(1i * 2 * pi * fc1 * t(1:length(y_norm)));
+y2_prime_shifted = y2_bb_filt .* exp(1i * 2 * pi * fc2 * t(1:length(y_norm)));
+
+% Initialize Codebook H with frequency-shifted Outputs
+H = [y1_prime_shifted, y2_prime_shifted];
+target = x1_prime_aligned; % Target is at fc1
+
+% Preallocate
+H = [H, zeros(length(target), R-B)];
+op_log = zeros(R, 5);
+lambda = 0.1;
+
+for r = (B+1):R
+    num_existing = r - 1;
+    min_E = inf;
+    best_phi = zeros(length(target), 1);
+    best_op = [0 0 0 0 0];
+    
+    % Type I Operations
+    for i1 = 1:num_existing
+        for m = 1:M_max
+            phi_g = [zeros(m, 1); H(1:end-m, i1)];
+            H_test = [H(:, 1:num_existing), phi_g];
+            
+            theta = (H_test' * H_test + lambda * eye(size(H_test,2))) \ (H_test' * target);
+            E = norm(H_test * theta - target);
+            
+            if E < min_E
+                min_E = E; best_phi = phi_g; best_op = [1, i1, 0, 0, m];
+            end
+        end
+    end
+    
+    % Type II Operations
+    for j1 = 1:num_existing
+        for j2 = 1:j1
+            for j3 = 1:num_existing
+                phi_g = H(:, j1) .* H(:, j2) .* conj(H(:, j3));
+                H_test = [H(:, 1:num_existing), phi_g];
+                
+                theta = (H_test' * H_test + lambda * eye(size(H_test,2))) \ (H_test' * target);
+                E = norm(H_test * theta - target);
+                
+                if E < min_E
+                    min_E = E; best_phi = phi_g; best_op = [2, j1, j2, j3, 0];
+                end
+            end
+        end
+    end
+    
+    H(:, r) = best_phi;
+    op_log(r, :) = best_op;
+end
+
+w_dpd_b1 = (H' * H + lambda * eye(size(H,2))) \ (H' * target);
+
+%% Predistortion Generation: Band 1
+H_pd = [x1_prime, x2_prime]; 
+H_pd = [H_pd, zeros(length(x1_prime), R-B)];
+
+for r = (B+1):R
+    op = op_log(r, :);
+    if op(1) == 1
+        m = op(5);
+        H_pd(:, r) = [zeros(m, 1); H_pd(1:end-m, op(2))];
+    elseif op(1) == 2
+        H_pd(:, r) = H_pd(:, op(2)) .* H_pd(:, op(3)) .* conj(H_pd(:, op(4)));
+    end
+end
+
+x_pd_b1 = H_pd * w_dpd_b1;
+
+%% MB-BAPS DPD Extraction: Band 2
+% 1. Downconvert, Filter, and RE-UPCONVERT to isolate Band 2 IF signals
+% Band 2 is centered at fc2 (e.g., +15 MHz)
+y1_bb_b2 = y_norm .* exp(-1i * 2 * pi * fc1 * t(1:length(y_norm)));
+y2_bb_b2 = y_norm .* exp(-1i * 2 * pi * fc2 * t(1:length(y_norm)));
+
+% Use the same isolation filter as Band 1
+y1_bb_filt_b2 = filtfilt(d_filt_ext, y1_bb_b2);
+y2_bb_filt_b2 = filtfilt(d_filt_ext, y2_bb_b2);
+
+% Re-upconvert to original IF locations for the H-matrix [cite: 167]
+y1_prime_b2 = y1_bb_filt_b2 .* exp(1i * 2 * pi * fc1 * t(1:length(y_norm)));
+y2_prime_b2 = y2_bb_filt_b2 .* exp(1i * 2 * pi * fc2 * t(1:length(y_norm)));
+
+% Initialize Codebook H for Band 2 [cite: 156]
+H_b2 = [y1_prime_b2, y2_prime_b2];
+target_b2 = x2_prime_aligned; % Target is the Band 2 input at fc2
+
+% Preallocate and log [cite: 531]
+H_b2 = [H_b2, zeros(length(target_b2), R-B)];
+op_log_b2 = zeros(R, 5); 
+lambda = 0.1; % Tikhonov regularization [cite: 252]
+
+for r = (B+1):R
+    num_existing = r - 1;
+    min_E = inf;
+    best_phi = zeros(length(target_b2), 1);
+    best_op = [0 0 0 0 0];
+    
+    % Type I Operations: Memory Delay [cite: 125]
+    for i1 = 1:num_existing
+        for m = 1:M_max
+            phi_g = [zeros(m, 1); H_b2(1:end-m, i1)];
+            H_test = [H_b2(:, 1:num_existing), phi_g];
+            
+            % Solve via Ridge Regression
+            theta = (H_test' * H_test + lambda * eye(size(H_test,2))) \ (H_test' * target_b2);
+            E = norm(H_test * theta - target_b2);
+            
+            if E < min_E
+                min_E = E; best_phi = phi_g; best_op = [1, i1, 0, 0, m];
+            end
+        end
+    end
+    
+    % Type II Operations: 3rd-order Nonlinearity 
+    for j1 = 1:num_existing
+        for j2 = 1:j1
+            for j3 = 1:num_existing
+                % Basis: phi_i * phi_l * conj(phi_k) 
+                phi_g = H_b2(:, j1) .* H_b2(:, j2) .* conj(H_b2(:, j3));
+                H_test = [H_b2(:, 1:num_existing), phi_g];
+                
+                theta = (H_test' * H_test + lambda * eye(size(H_test,2))) \ (H_test' * target_b2);
+                E = norm(H_test * theta - target_b2);
+                
+                if E < min_E
+                    min_E = E; best_phi = phi_g; best_op = [2, j1, j2, j3, 0];
+                end
+            end
+        end
+    end
+    
+    H_b2(:, r) = best_phi;
+    op_log_b2(r, :) = best_op;
+end
+
+% Final model coefficients for Band 2 [cite: 252]
+w_dpd_b2 = (H_b2' * H_b2 + lambda * eye(size(H_b2,2))) \ (H_b2' * target_b2);
+
+%% Predistortion Generation: Band 2
+% Reconstruct using the original ideal inputs [cite: 170]
+H_pd_b2 = [x1_prime, x2_prime];
+H_pd_b2 = [H_pd_b2, zeros(length(x1_prime), R-B)];
+
+for r = (B+1):R
+    op = op_log_b2(r, :);
+    if op(1) == 1
+        m = op(5);
+        H_pd_b2(:, r) = [zeros(m, 1); H_pd_b2(1:end-m, op(2))];
+    elseif op(1) == 2
+        H_pd_b2(:, r) = H_pd_b2(:, op(2)) .* H_pd_b2(:, op(3)) .* conj(H_pd_b2(:, op(4)));
+    end
+end
+
+x_pd_b2 = H_pd_b2 * w_dpd_b2;
+
+%% Final Composite Upconversion
+% The predistorted signal generated by DPD is ALREADY at IF.
+% Do NOT multiply by the carrier exponential again.
+x_pd = x_pd_b1 + x_pd_b2;
+
+% Apply amplitude hard-clipping while strictly preserving the phase array
+clip_idx = abs(x_pd) > max_allowable_peak;
+x_pd(clip_idx) = max_allowable_peak .* exp(1i * angle(x_pd(clip_idx)));
 
 %% ========================================================================
 %  --- END DPD ALGORITHM DROP-IN ZONE ---
@@ -226,20 +411,23 @@ fprintf('DPD IM3      (Lower / Upper): %.2f dBc / %.2f dBc\n', ...
     10*log10(P_im3_lower_pd / P_main1_pd), 10*log10(P_im3_upper_pd / P_main2_pd));
 
 %% 9. Time-Domain EVM Calculation (Parseval's Theorem)
-% By filtering the downconverted band, time-domain RMSE equals frequency-domain EVM.
+% Generate strict local time vectors to prevent slicing length mismatches
+t_eval_base = (0:length(y_norm)-1)' / fs_weblab;
+t_eval_pd   = (0:length(y_pd_aligned_norm)-1)' / fs_weblab;
+t_eval_orig = (0:length(x_orig_eval)-1)' / fs_weblab;
 
-% 1. Downconvert Band 1 (Desired Signal) to DC
-y_b1_base = y_norm .* exp(-1i * 2 * pi * fc1 * t(1:length(y_norm)));
-y_b1_pd   = y_pd_aligned_norm .* exp(-1i * 2 * pi * fc1 * t(1:length(y_pd_aligned_norm)));
-x_b1_ideal = x_aligned .* exp(-1i * 2 * pi * fc1 * t(1:length(x_aligned)));
+% 1. Downconvert Band 1 (Desired Signal) to DC independently
+y_b1_base  = y_norm .* exp(-1i * 2 * pi * fc1 * t_eval_base);
+y_b1_pd    = y_pd_aligned_norm .* exp(-1i * 2 * pi * fc1 * t_eval_pd);
+x_b1_ideal = x_orig_eval .* exp(-1i * 2 * pi * fc1 * t_eval_orig);
 
 % 2. Isolate Band 1 with a strict Low-Pass Filter
 % Cutoff at 10 MHz isolates the 20 MHz bandwidth carrier
 d_filt = designfilt('lowpassfir', 'PassbandFrequency', 9e6, ...
     'StopbandFrequency', 12e6, 'SampleRate', fs_weblab);
 
-y_b1_base_filt = filtfilt(d_filt, y_b1_base);
-y_b1_pd_filt   = filtfilt(d_filt, y_b1_pd);
+y_b1_base_filt  = filtfilt(d_filt, y_b1_base);
+y_b1_pd_filt    = filtfilt(d_filt, y_b1_pd);
 x_b1_ideal_filt = filtfilt(d_filt, x_b1_ideal);
 
 % 3. Normalize individual band magnitude to reference
