@@ -116,36 +116,10 @@ y_norm = y_aligned * G_lin;
 %  or pass them into your MATLAB neural network inference function here.
 % ========================================================================
 
-% Step A: Extraction (Learning the inverse PA behavior)
-% Target: Find a function f() such that x_aligned = f(y_norm)
-% [EXAMPLE: Memory Polynomial Extraction]
-M = 3; % Memory depth
-K = 5; % Non-linear order (must be odd)
-Phi = zeros(length(y_norm), M * ((K+1)/2)); % Pre-allocate basis matrix
-
-col = 1;
-for m = 0:M-1
-    for k = 1:2:K
-        shifted_y = [zeros(m,1); y_norm(1:end-m)];
-        Phi(:, col) = shifted_y .* abs(shifted_y).^(k-1);
-        col = col + 1;
-    end
-end
-% Solve for coefficients using Least Squares
-w_dpd = Phi \ x_aligned; 
-
-% Step B: Predistortion (Applying the inverse to the original signal)
-% Target: Create x_pd = f(x_orig)
-Phi_pd = zeros(length(x_orig), M * ((K+1)/2));
-col = 1;
-for m = 0:M-1
-    for k = 1:2:K
-        shifted_x = [zeros(m,1); x_orig(1:end-m)];
-        Phi_pd(:, col) = shifted_x .* abs(shifted_x).^(k-1);
-        col = col + 1;
-    end
-end
-x_pd = Phi_pd * w_dpd;
+% Step A & B: Load weights and run DeltaGRU DPD
+mat_file = 'DPD_S_0_M_DELTAGRU_TCNSKIP_H_15_F_200_P_999_THX_0_010_THH_0_050.mat';
+w = load(mat_file);
+x_pd = dpd_deltagru_infer(y_norm, w);
 
 %% ========================================================================
 %  --- END DPD ALGORITHM DROP-IN ZONE ---
