@@ -1,0 +1,40 @@
+{
+  "dataset_format": "split_csv",
+  "split_ratios": {
+    "train": 0.6,
+    "val": 0.2,
+    "test": 0.2
+  },
+  "input_signal_fs": 2.0E+8,
+  "bw_main_ch": 1.836E+7,
+  "bw_sub_ch": 1.836E+7,
+  "n_sub_ch": 2,
+  "nperseg": 2560,
+  "acquisition": {
+    "source": "RFWebLab_PA_meas_v1_2",
+    "n_captures": 6,
+    "samples_per_capture": 120000,
+    "max_retries": 3,
+    "rmsin_margin_db": 0.75,
+    "signal_type": "OFDM",
+    "signal_profile": "5G NR FR1-like multiband",
+    "mod_order": 64,
+    "nfft": 1024,
+    "cp_len": 72,
+    "cp_len_first": 80,
+    "target_papr_db": 12,
+    "fs_bb_hz": 3.072E+7,
+    "fc1_hz": -4.0E+7,
+    "fc2_hz": 4.0E+7,
+    "nr_scs_hz": 30000,
+    "nr_symbols_per_slot": 14,
+    "nr_dmrs_symbols": [
+      4,
+      11
+    ],
+    "nr_guard_sc_each_side": 6,
+    "nr_data_occupancy": 0.9,
+    "enable_plots": true,
+    "plot_max_samples": 300000
+  }
+}
