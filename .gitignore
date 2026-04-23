@@ -45,6 +45,9 @@ dpd_out/
 log/
 save/
 
+#dataset
+datasets/RFWebLab_PA_200MHz
+
 # Allow sample data but not large datasets
 datasets/**/data/*.csv
 datasets/**/data/*.npy

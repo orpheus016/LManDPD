@@ -155,8 +155,9 @@ cfg.bb_n_rb = 51;
 cfg.cp_len = 72;
 cfg.cp_len_first = 80;
 cfg.mod_order = 64;
-cfg.fc1_hz = -15e6;
-cfg.fc2_hz = 15e6;
+cfg.fc1_hz = -60e6;
+cfg.fc2_hz = 0;
+cfg.fc3_hz = 60e6;
 cfg.nr_scs_hz = 30e3;
 cfg.nr_symbols_per_slot = 14;
 cfg.nr_dmrs_symbols = [4, 11];
@@ -173,7 +174,7 @@ cfg.train_ratio = 0.6;
 cfg.val_ratio = 0.2;
 cfg.test_ratio = 0.2;
 
-cfg.n_sub_ch = 2;
+cfg.n_sub_ch = 3;
 cfg.nperseg = 2560;
 cfg.random_seed = 0;
 cfg.enable_plots = true;
@@ -277,7 +278,7 @@ function x = generate_ofdm_excitation(num_samples, cfg)
 % - Slot-based OFDM (14 symbols/slot)
 % - Normal CP with first-symbol extension
 % - PDSCH-like random data with DMRS-like pilot symbols
-% - Two component carriers shifted to IF and summed
+% - Three component carriers shifted to IF and summed
 fs_weblab = cfg.fs_hz;
 fs_bb = cfg.fs_bb_hz;
 N_fft = cfg.bb_nfft;
@@ -295,33 +296,39 @@ N_slots = ceil(N_symbols / symbols_per_slot);
 
 bb1 = complex([], []);
 bb2 = complex([], []);
+bb3 = complex([], []);
 
 for slot_idx = 1:N_slots
     slot_td_1 = nr_slot_waveform(cfg, N_fft, N_sc, cp_len, cp_len_first);
     slot_td_2 = nr_slot_waveform(cfg, N_fft, N_sc, cp_len, cp_len_first);
+    slot_td_3 = nr_slot_waveform(cfg, N_fft, N_sc, cp_len, cp_len_first);
 
     bb1 = [bb1; slot_td_1]; %#ok<AGROW>
     bb2 = [bb2; slot_td_2]; %#ok<AGROW>
+    bb3 = [bb3; slot_td_3]; %#ok<AGROW>
 end
 
-if numel(bb1) < bb_samples_needed || numel(bb2) < bb_samples_needed
+if numel(bb1) < bb_samples_needed || numel(bb2) < bb_samples_needed || numel(bb3) < bb_samples_needed
     error('Generated baseband waveform is shorter than requested.');
 end
 
 bb1 = bb1(1:bb_samples_needed);
 bb2 = bb2(1:bb_samples_needed);
+bb3 = bb3(1:bb_samples_needed);
 
 [P, Q] = rat(fs_weblab / fs_bb);
 bb1_resamp = resample(bb1, P, Q);
 bb2_resamp = resample(bb2, P, Q);
+bb3_resamp = resample(bb3, P, Q);
 
-len = min([numel(bb1_resamp), numel(bb2_resamp)]);
+len = min([numel(bb1_resamp), numel(bb2_resamp), numel(bb3_resamp)]);
 t = (0:len - 1)' / fs_weblab;
 
 x1_prime = bb1_resamp(1:len) .* exp(1i * 2 * pi * cfg.fc1_hz * t);
 x2_prime = bb2_resamp(1:len) .* exp(1i * 2 * pi * cfg.fc2_hz * t);
+x3_prime = bb3_resamp(1:len) .* exp(1i * 2 * pi * cfg.fc3_hz * t);
 
-x = x1_prime + x2_prime;
+x = x1_prime + x2_prime + x3_prime;
 x = x(1:min(num_samples, numel(x)));
 x = apply_cfr(x, cfg.target_papr_db, cfg.max_cfr_iters);
 if numel(x) < num_samples
@@ -488,7 +495,8 @@ end
 
 edge1 = abs(cfg.fc1_hz) + bw_sub / 2;
 edge2 = abs(cfg.fc2_hz) + bw_sub / 2;
-max_edge = max(edge1, edge2);
+edge3 = abs(cfg.fc3_hz) + bw_sub / 2;
+max_edge = max([edge1, edge2, edge3]);
 
 if max_edge > 80e6
     error(['Configured carriers exceed RFWebLab usable band [-80,80] MHz. ', ...
@@ -497,6 +505,10 @@ end
 
 if bw_sub >= 80e6
     error('Per-carrier occupied bandwidth must be < 80 MHz for RFWebLab use.');
+end
+
+if numel(unique([cfg.fc1_hz, cfg.fc2_hz, cfg.fc3_hz])) < 3
+    warning('At least two carrier centers are identical; spectrum will have fewer than 3 distinct bands.');
 end
 end
 
@@ -820,6 +832,7 @@ acq.target_papr_db = cfg.target_papr_db;
 acq.fs_bb_hz = cfg.fs_bb_hz;
 acq.fc1_hz = cfg.fc1_hz;
 acq.fc2_hz = cfg.fc2_hz;
+acq.fc3_hz = cfg.fc3_hz;
 acq.nr_scs_hz = cfg.nr_scs_hz;
 acq.nr_symbols_per_slot = cfg.nr_symbols_per_slot;
 acq.nr_dmrs_symbols = cfg.nr_dmrs_symbols;
