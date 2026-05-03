@@ -83,16 +83,36 @@ def generate_dictionary_matrix_H(x1, x2, x3, memory_depth_M):
         
     return H
 
-# --- Execution Example ---
-# Assuming you have 10,000 samples per band separated by your DDC script
-N_samples = 10000
-x1_data = np.random.randn(N_samples) + 1j * np.random.randn(N_samples)
-x2_data = np.random.randn(N_samples) + 1j * np.random.randn(N_samples)
-x3_data = np.random.randn(N_samples) + 1j * np.random.randn(N_samples)
 
-M = 4 # Memory depth as defined in Jaraut
+if __name__ == "__main__":
+    import os
+    
+    # 1. Load the preprocessed binary data (both inputs and outputs)
+    data_path = "datasets/RFWebLab_PA_200MHz/isolated_bands.npz"
+    try:
+        dataset = np.load(data_path)
+        x1_data, x2_data, x3_data = dataset['x1'], dataset['x2'], dataset['x3']
+        y1_data, y2_data, y3_data = dataset['y1'], dataset['y2'], dataset['y3']
+    except FileNotFoundError:
+        print(f"Error: Run band_separation.py first to generate {data_path}")
+        exit(1)
 
-# Construct the numerical dictionary matrix H
-H_matrix = generate_dictionary_matrix_H(x1_data, x2_data, x3_data, M)
+    # 2. Define TDNN Memory Depth
+    M = 4 # Memory depth as defined in Jaraut
 
-print(f"Shape of Dictionary Matrix H: {H_matrix.shape}")
+    # 3. Construct the numerical dictionary matrix H (Features)
+    H_matrix = generate_dictionary_matrix_H(x1_data, x2_data, x3_data, M)
+    print(f"Shape of Dictionary Matrix H: {H_matrix.shape}")
+    
+    # 4. Truncate the targets (Y) to perfectly align with the memory-shifted H matrix
+    y1_target = y1_data[M:]
+    y2_target = y2_data[M:]
+    y3_target = y3_data[M:]
+    
+    # Verify dimensional alignment
+    assert H_matrix.shape[0] == y1_target.shape[0], "Temporal alignment failed!"
+
+    # 5. Save the aligned H matrix and target labels for the Selection Engine
+    out_file = "datasets/RFWebLab_PA_200MHz/H_matrix_and_Targets_M4.npz"
+    np.savez(out_file, H_matrix=H_matrix, y1=y1_target, y2=y2_target, y3=y3_target)
+    print(f"Successfully saved basis matrix and targets to {out_file}")

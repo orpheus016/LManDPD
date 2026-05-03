@@ -193,21 +193,20 @@ def plot_pareto(
     plt.close()
 
 
-def load_array(path: str) -> np.ndarray:
-    if path.endswith(".npy"):
-        return np.load(path)
-    if path.endswith(".npz"):
-        data = np.load(path)
-        if "arr_0" in data:
-            return data["arr_0"]
-        raise ValueError("NPZ file must contain 'arr_0' or be provided as .npy.")
-    raise ValueError("Only .npy or .npz files are supported.")
+def load_dataset_keys(path: str, h_key: str, y_key: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Extracts the specific H matrix and target band from the multi-array archive."""
+    if not path.endswith(".npz"):
+        raise ValueError("Dataset must be the multi-array .npz archive.")
+    data = np.load(path)
+    if h_key not in data or y_key not in data:
+        raise KeyError(f"Keys {h_key} and/or {y_key} not found in {path}. Available keys: {list(data.keys())}")
+    return data[h_key], data[y_key]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Basis selection for tri-band DPD dictionary matrix.")
-    parser.add_argument("--h_matrix", required=True, help="Path to complex H_matrix (.npy or .npz).")
-    parser.add_argument("--y_target", required=True, help="Path to complex Y_target (.npy or .npz).")
+    parser.add_argument("--dataset", required=True, help="Path to H_matrix_and_Targets_M4.npz")
+    parser.add_argument("--target_band", required=True, choices=["y1", "y2", "y3"], help="Which PA output band to optimize against.")
     parser.add_argument("--val_ratio", type=float, default=0.25, help="Validation split ratio.")
     parser.add_argument("--random_state", type=int, default=42, help="Random seed for split.")
     parser.add_argument("--nmse_threshold", type=float, default=-40.0, help="Target NMSE in dB.")
@@ -217,8 +216,11 @@ def main() -> None:
     parser.add_argument("--output_dir", default="dpd_out/analysis/basis_selection", help="Output directory.")
     args = parser.parse_args()
 
-    h_matrix = load_array(args.h_matrix)
-    y_target = load_array(args.y_target)
+    h_matrix, y_target = load_dataset_keys(
+        path=args.dataset,
+        h_key="H_matrix",
+        y_key=args.target_band
+    )
 
     h_real, y_real = project_complex_to_real_concat(h_matrix, y_target)
 
@@ -235,7 +237,7 @@ def main() -> None:
         y_real,
         test_size=args.val_ratio,
         random_state=args.random_state,
-        shuffle=True,
+        shuffle=False, 
     )
 
     omp_result = omp_sweep(h_train, y_train, h_val, y_val)
