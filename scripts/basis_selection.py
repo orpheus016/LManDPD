@@ -295,17 +295,43 @@ def select_at_threshold(result: SweepResult, target_nmse_db: float) -> Tuple[int
 
 
 def plot_pareto(
-    bomp_result: SweepResult,
-    group_lasso_result: SweepResult,
+    band_results_dict: Dict[str, SweepResult],
     output_path: str,
 ) -> None:
-    plt.figure(figsize=(8, 6))
-    plt.plot(bomp_result.feature_counts, bomp_result.nmse_db, "-o", label="BOMP")
-    plt.plot(group_lasso_result.feature_counts, group_lasso_result.nmse_db, "-s", label="Group LASSO")
-    plt.xlabel("Active Groups")
-    plt.ylabel("NMSE (dB)")
-    plt.grid(True)
-    plt.legend()
+    """
+    Plot BOMP Pareto frontier for all bands on a single figure.
+    
+    Args:
+        band_results_dict: Dictionary mapping band name (y1, y2, y3) to SweepResult
+        output_path: Path to save the figure
+    """
+    plt.figure(figsize=(10, 6))
+    colors = {"y1": "blue", "y2": "green", "y3": "red"}
+    markers = {"y1": "o", "y2": "s", "y3": "^"}
+    
+    for band_name, bomp_result in band_results_dict.items():
+        color = colors.get(band_name, "black")
+        marker = markers.get(band_name, "o")
+        plt.plot(
+            bomp_result.feature_counts,
+            bomp_result.nmse_db,
+            f"-{marker}",
+            label=f"BOMP ({band_name})",
+            color=color,
+            markersize=6,
+        )
+    
+    # Compute min/max feature counts across all bands
+    all_feature_counts = [fc for result in band_results_dict.values() for fc in result.feature_counts]
+    min_fc = min(all_feature_counts) if all_feature_counts else 0
+    max_fc = max(all_feature_counts) if all_feature_counts else 1
+    
+    plt.xlabel("Active Groups", fontsize=12)
+    plt.xticks(np.arange(min_fc, max_fc + 1, 2))
+    plt.ylabel("NMSE (dB)", fontsize=12)
+    plt.title("BOMP Pareto Frontier: NMSE vs Active Groups", fontsize=13)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=10)
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
@@ -382,6 +408,7 @@ def main() -> None:
 
     target_keys = ["y1", "y2", "y3"]
     band_results = {}
+    bomp_results_per_band = {}  # Store BOMP sweep results for plotting
     unified_groups_set = set()
     base_names = get_base_feature_names()
     num_base_features = len(base_names)
@@ -431,6 +458,7 @@ def main() -> None:
         )
 
         bomp_result = block_omp_sweep(h_train, y_train, h_val, y_val, groups)
+        bomp_results_per_band[target_band] = bomp_result  # Store for plotting
 
         bomp_count, bomp_active, bomp_param = select_at_threshold(bomp_result, args.nmse_threshold)
         
@@ -474,6 +502,11 @@ def main() -> None:
         json.dump(hardware_blueprint, handle, indent=2)
 
     print(f"\n✓ Hardware blueprint saved to: {blueprint_path}")
+    
+    # Generate Pareto plot for all bands
+    pareto_path = os.path.join(args.output_dir, "pareto_nmse_vs_groups.png")
+    plot_pareto(bomp_results_per_band, pareto_path)
+    print(f"✓ Pareto plot saved to: {pareto_path}")
 
 
 if __name__ == "__main__":
