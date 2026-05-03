@@ -10,7 +10,7 @@ run the generate_dictionary_matrix_H to get the dictionary matrix H for the isol
 ```bash
 python utils/generate_dictionary_matrix_H.py --input_path /path/to/isolated_bands.npz --output_path /path/to/H_matrix.npz
 ```
-for now the dataset path is hardcoded will need refactor later
+for now the dataset path is hardcoded will need refactor later. Currently the .npz file is in datasets/RFWeblab_PA_200MHz/isolated_bands.npz and the output H matrix will be saved to datasets/RFWebLab_PA_200MHz/H_matrix_and_Targets_M4.npz
 
 ## Feature Selection
 Run the basis_selection script to perform feature selection using BOMP. This will output a blueprint of the selected features for each band. You can specify the stopbands according to your requirements. The example below assumes three bands centered at -60 MHz, 0 MHz, and 60 MHz with a bandwidth of 20 MHz each.
