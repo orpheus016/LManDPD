@@ -1,14 +1,14 @@
 ## Band Isolation
 run the band isolation to acquire the .npz file containing the isolated bands. This will be used for feature selection in the next step.
 ```bash
-python band_isolation.py --dataset /path/to/your/dataset.npz --output_dir /path/to/output
+python utils/band_separation.py --dataset /path/to/your/dataset.npz --output_dir /path/to/output
 ```
 for now the dataset path is hardcoded will need refactor later
 
 ## Dictionary Matrix Generation
 run the generate_dictionary_matrix_H to get the dictionary matrix H for the isolated bands. This will be used for feature selection in the next step.
 ```bash
-python generate_dictionary_matrix_H.py --input_path /path/to/isolated_bands.npz --output_path /path/to/H_matrix.npz
+python utils/generate_dictionary_matrix_H.py --input_path /path/to/isolated_bands.npz --output_path /path/to/H_matrix.npz
 ```
 for now the dataset path is hardcoded will need refactor later
 
