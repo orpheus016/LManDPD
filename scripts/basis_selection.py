@@ -331,7 +331,6 @@ def get_feature_names(memory_depth_M):
     base_complex_names = [
         # 1. Intra-band features (12 total)
         "x1", "x1*|x1|^2", "x2", "x2*|x2|^2", "x3", "x3*|x3|^2",
-        "|x1|", "|x2|", "|x3|", "|x1|^3", "|x2|^3", "|x3|^3",
         # 2. Cross-band envelope features (6 total)
         "x1*|x2|^2", "x1*|x3|^2", "x2*|x1|^2", "x2*|x3|^2", "x3*|x1|^2", "x3*|x2|^2",
         # 3. IMD3 Phase-Coherent Cross-terms (6 total)
@@ -357,7 +356,6 @@ def get_feature_names(memory_depth_M):
 def get_base_feature_names() -> List[str]:
     return [
         "x1", "x1*|x1|^2", "x2", "x2*|x2|^2", "x3", "x3*|x3|^2",
-        "|x1|", "|x2|", "|x3|", "|x1|^3", "|x2|^3", "|x3|^3",
         "x1*|x2|^2", "x1*|x3|^2", "x2*|x1|^2", "x2*|x3|^2", "x3*|x1|^2", "x3*|x2|^2",
         "x1^2*x2^*", "x2^2*x1^*", "x2^2*x3^*", "x3^2*x2^*", "x1^3*x3^*", "x3^3*x1^*",
         "x1*x2*x3^*", "x1^* * x2^2 * x3^*",
@@ -367,7 +365,6 @@ def get_base_feature_names() -> List[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Basis selection for tri-band DPD dictionary matrix.")
     parser.add_argument("--dataset", required=True, help="Path to H_matrix_and_Targets_M4.npz")
-    parser.add_argument("--target_band", required=True, choices=["y1", "y2", "y3"], help="Which PA output band to optimize against.")
     parser.add_argument("--val_ratio", type=float, default=0.25, help="Validation split ratio.")
     parser.add_argument("--random_state", type=int, default=42, help="Random seed for split.")
     parser.add_argument("--nmse_threshold", type=float, default=-40.0, help="Target NMSE in dB.")
@@ -383,99 +380,100 @@ def main() -> None:
     parser.add_argument("--output_dir", default="dpd_out/analysis/basis_selection", help="Output directory.")
     args = parser.parse_args()
 
-    h_matrix, y_target = load_dataset_keys(
-        path=args.dataset,
-        h_key="H_matrix",
-        y_key=args.target_band
-    )
-
-    if args.fs is not None and args.stopbands is not None:
-        stopbands = parse_stopbands(args.stopbands)
-        h_matrix, y_target = apply_frequency_weighting(h_matrix, y_target, args.fs, stopbands)
-
-    h_real, y_real = project_complex_to_real_concat(h_matrix, y_target)
-
+    target_keys = ["y1", "y2", "y3"]
+    band_results = {}
+    unified_groups_set = set()
     base_names = get_base_feature_names()
     num_base_features = len(base_names)
-    if h_matrix.shape[1] % num_base_features != 0:
-        raise ValueError(
-            f"H_matrix columns ({h_matrix.shape[1]}) not divisible by base feature count ({num_base_features})."
+    memory_depth_M = None
+    groups = None
+
+    print("="*60)
+    print("MULTI-BAND BASIS SELECTION (BOMP)")
+    print("="*60)
+
+    for target_band in target_keys:
+        print(f"\n--- Processing band: {target_band} ---")
+        
+        h_matrix, y_target = load_dataset_keys(
+            path=args.dataset,
+            h_key="H_matrix",
+            y_key=target_band
         )
-    memory_depth_M = h_matrix.shape[1] // num_base_features
-    groups = build_group_indices(num_base_features, memory_depth_M)
 
-    cond_number = compute_condition_number(h_real)
-    print(f"Condition number (H_real): {cond_number:.3e}")
-    if cond_number > 1e4:
-        print("Warning: Condition number exceeds 1e4. Severe collinearity detected.")
+        if args.fs is not None and args.stopbands is not None:
+            stopbands = parse_stopbands(args.stopbands)
+            h_matrix, y_target = apply_frequency_weighting(h_matrix, y_target, args.fs, stopbands)
 
-    h_scaled, scaler_params, scaler = standardize_features(h_real)
-    print("Scaler mean/scale saved for weight denormalization.")
+        h_real, y_real = project_complex_to_real_concat(h_matrix, y_target)
 
-    h_train, h_val, y_train, y_val = train_test_split(
-        h_scaled,
-        y_real,
-        test_size=args.val_ratio,
-        random_state=args.random_state,
-        shuffle=False, 
-    )
+        if memory_depth_M is None:
+            if h_matrix.shape[1] % num_base_features != 0:
+                raise ValueError(
+                    f"H_matrix columns ({h_matrix.shape[1]}) not divisible by base feature count ({num_base_features})."
+                )
+            memory_depth_M = h_matrix.shape[1] // num_base_features
+            groups = build_group_indices(num_base_features, memory_depth_M)
 
-    bomp_result = block_omp_sweep(h_train, y_train, h_val, y_val, groups)
-    group_lasso_result = group_lasso_sweep(
-        h_train,
-        y_train,
-        h_val,
-        y_val,
-        groups,
-        alpha_min=args.alpha_min,
-        alpha_max=args.alpha_max,
-        alpha_points=args.alpha_points,
-    )
+        cond_number = compute_condition_number(h_real)
+        print(f"  Condition number: {cond_number:.3e}")
+        if cond_number > 1e4:
+            print("  Warning: Condition number exceeds 1e4. Severe collinearity detected.")
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    plot_path = os.path.join(args.output_dir, "pareto_nmse_vs_groups.png")
-    plot_pareto(bomp_result, group_lasso_result, plot_path)
+        h_scaled, scaler_params, scaler = standardize_features(h_real)
 
-    bomp_count, bomp_active, bomp_param = select_at_threshold(bomp_result, args.nmse_threshold)
-    gl_count, gl_active, gl_param = select_at_threshold(group_lasso_result, args.nmse_threshold)
+        h_train, h_val, y_train, y_val = train_test_split(
+            h_scaled,
+            y_real,
+            test_size=args.val_ratio,
+            random_state=args.random_state,
+            shuffle=False,
+        )
 
-    summary = {
-        "condition_number": cond_number,
-        "nmse_threshold_db": args.nmse_threshold,
-        "bomp": {
+        bomp_result = block_omp_sweep(h_train, y_train, h_val, y_val, groups)
+
+        bomp_count, bomp_active, bomp_param = select_at_threshold(bomp_result, args.nmse_threshold)
+        
+        band_results[target_band] = {
             "selected_group_count": int(bomp_count),
             "active_group_indices": bomp_active.tolist(),
             "model_param": bomp_param,
-        },
-        "group_lasso": {
-            "selected_group_count": int(gl_count),
-            "active_group_indices": gl_active.tolist(),
-            "model_param": gl_param,
-        },
-        "scaler": {
-            "mean": scaler_params.mean.tolist(),
-            "scale": scaler_params.scale.tolist(),
-        },
-        "pareto_plot": plot_path.replace("\\", "/"),
+        }
+        
+        unified_groups_set.update(bomp_active.tolist())
+        
+        print(f"  BOMP active groups @ {args.nmse_threshold} dB: {bomp_active.tolist()}")
+        for idx in bomp_active:
+            if idx < len(base_names):
+                print(f"    Group {idx:2} : {base_names[idx]}")
+
+    unified_groups_sorted = sorted(list(unified_groups_set))
+    
+    print("\n" + "="*60)
+    print("HARDWARE MASTER BASIS SET (UNION ACROSS ALL BANDS)")
+    print("="*60)
+    print(f"Unified groups: {unified_groups_sorted}")
+    print(f"Total unique groups: {len(unified_groups_sorted)}")
+    print()
+    for idx in unified_groups_sorted:
+        if idx < len(base_names):
+            print(f"  Group {idx:2} : {base_names[idx]} (all taps, Re+Im)")
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    hardware_blueprint = {
+        "nmse_threshold_db": args.nmse_threshold,
+        "unified_active_groups": unified_groups_sorted,
+        "total_unique_groups": len(unified_groups_sorted),
+        "per_band_results": band_results,
+        "group_names": {str(idx): base_names[idx] for idx in unified_groups_sorted},
     }
 
-    summary_path = os.path.join(args.output_dir, "basis_selection_summary.json")
-    with open(summary_path, "w", encoding="utf-8") as handle:
-        json.dump(summary, handle, indent=2)
+    blueprint_path = os.path.join(args.output_dir, "hardware_blueprint.json")
+    with open(blueprint_path, "w", encoding="utf-8") as handle:
+        json.dump(hardware_blueprint, handle, indent=2)
 
-    print(f"BOMP active groups @ {args.nmse_threshold} dB: {bomp_active.tolist()}")
-    print(f"Group LASSO active groups @ {args.nmse_threshold} dB: {gl_active.tolist()}")
-    print(f"Summary saved to: {summary_path}")
-
-    # After computing omp_active
-    print("\n" + "="*30)
-    print("HARDWARE FEATURE BLUEPRINT (BOMP)")
-    print("="*30)
-    for idx in bomp_active:
-        if idx < len(base_names):
-            print(f"Group {idx:2} : {base_names[idx]} (all taps, Re+Im)")
-        else:
-            print(f"Group {idx:2} : [OUT OF BOUNDS - Check P and M alignment]")
+    print(f"\n✓ Hardware blueprint saved to: {blueprint_path}")
 
 
 if __name__ == "__main__":
