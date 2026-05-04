@@ -23,7 +23,11 @@ class CoreModel(nn.Module):
         self.bidirectional = False
         self.bias = True
 
-        if backbone_type == 'gmp':
+        if backbone_type == 'triband_bdomp_tdnn':
+            self.output_size = 6
+            from backbones.triband_bdomp_tdnn import TriBand_BDOMP_TDNN
+            self.backbone = TriBand_BDOMP_TDNN(hidden_size=self.hidden_size)
+        elif backbone_type == 'gmp':
             from backbones.gmp import GMP
             self.backbone = GMP()
         elif backbone_type == 'gru':
