@@ -1,12 +1,8 @@
 import argparse
 import json
 import os
-import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Tuple
-
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import matplotlib
@@ -14,8 +10,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-
-from utils import metrics
 
 
 @dataclass
@@ -31,8 +25,6 @@ class SweepResult:
     active_indices: List[np.ndarray]
     model_params: List[Dict[str, float]]
     flop_counts: List[float]
-    evm_db: List[float] = field(default_factory=list)
-    aclr_avg_db: List[float] = field(default_factory=list)
 
 
 def project_complex_to_real_concat(h_complex: np.ndarray, y_complex: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -144,18 +136,6 @@ def build_group_indices(num_base_features: int, memory_depth_M: int) -> List[np.
     return groups
 
 
-def segment_iq(iq: np.ndarray, nperseg: int) -> np.ndarray:
-    n_total = iq.shape[0]
-    segments = []
-    for start in range(0, n_total, nperseg):
-        seg = iq[start:start + nperseg]
-        if seg.shape[0] < nperseg:
-            pad = np.zeros((nperseg - seg.shape[0], 2), dtype=seg.dtype)
-            seg = np.vstack((seg, pad))
-        segments.append(seg)
-    return np.asarray(segments)
-
-
 def calculate_flops(active_groups: np.ndarray, memory_depth_M: int, num_bands: int) -> float:
     linear_indices = {0, 2, 4}
     envelope_indices = {1, 3, 5, 6, 7, 8, 9, 10, 11}
@@ -188,10 +168,6 @@ def block_omp_sweep(
     groups: List[np.ndarray],
     memory_depth_M: int,
     num_bands: int,
-    fs: float,
-    bw_main_ch: float,
-    n_sub_ch: int,
-    nperseg: int,
 ) -> SweepResult:
     n_groups = len(groups)
     max_groups = min(n_groups, h_train.shape[0] - 1)
@@ -204,8 +180,6 @@ def block_omp_sweep(
     active_groups: List[int] = []
     feature_counts: List[int] = []
     nmse_db_values: List[float] = []
-    evm_db_values: List[float] = []
-    aclr_avg_db_values: List[float] = []
     active_indices: List[np.ndarray] = []
     params: List[Dict[str, float]] = []
     flop_counts: List[float] = []
@@ -237,30 +211,8 @@ def block_omp_sweep(
 
         y_pred = h_val[:, selected_cols] @ coef
         nmse_db = nmse_db_real(y_pred, y_val)
-        pred_segments = segment_iq(y_pred, nperseg)
-        gt_segments = segment_iq(y_val, nperseg)
-        evm_db = float(
-            metrics.EVM(
-                pred_segments,
-                gt_segments,
-                sample_rate=int(fs),
-                bw_main_ch=bw_main_ch,
-                n_sub_ch=n_sub_ch,
-                nperseg=nperseg,
-            )
-        )
-        aclr_left_db, aclr_right_db = metrics.ACLR(
-            pred_segments,
-            fs=int(fs),
-            nperseg=nperseg,
-            bw_main_ch=bw_main_ch,
-            n_sub_ch=n_sub_ch,
-        )
-        aclr_avg_db = float((aclr_left_db + aclr_right_db) / 2.0)
         feature_counts.append(len(active_groups))
         nmse_db_values.append(nmse_db)
-        evm_db_values.append(evm_db)
-        aclr_avg_db_values.append(aclr_avg_db)
         active_idx = np.array(active_groups, dtype=int)
         active_indices.append(active_idx)
         params.append({"active_groups": float(len(active_groups))})
@@ -269,8 +221,6 @@ def block_omp_sweep(
     return SweepResult(
         feature_counts=feature_counts,
         nmse_db=nmse_db_values,
-        evm_db=evm_db_values,
-        aclr_avg_db=aclr_avg_db_values,
         active_indices=active_indices,
         model_params=params,
         flop_counts=flop_counts,
@@ -282,79 +232,6 @@ def group_soft_threshold(w_group: np.ndarray, threshold: float) -> np.ndarray:
     if norm <= threshold:
         return np.zeros_like(w_group)
     return (1.0 - threshold / norm) * w_group
-
-
-def group_lasso_fit(
-    h_train: np.ndarray,
-    y_train: np.ndarray,
-    groups: List[np.ndarray],
-    alpha: float,
-    max_iter: int = 200,
-    tol: float = 1e-6,
-) -> np.ndarray:
-    n_features = h_train.shape[1]
-    n_outputs = y_train.shape[1]
-    w = np.zeros((n_features, n_outputs))
-
-    lipschitz = np.linalg.norm(h_train, 2) ** 2
-    if lipschitz == 0:
-        return w
-    step = 1.0 / lipschitz
-
-    for _ in range(max_iter):
-        grad = h_train.T @ (h_train @ w - y_train)
-        w_next = w - step * grad
-        for g_cols in groups:
-            w_group = w_next[g_cols, :]
-            w_next[g_cols, :] = group_soft_threshold(w_group, step * alpha * np.sqrt(len(g_cols)))
-
-        if np.linalg.norm(w_next - w) < tol:
-            w = w_next
-            break
-        w = w_next
-
-    return w
-
-
-def group_lasso_sweep(
-    h_train: np.ndarray,
-    y_train: np.ndarray,
-    h_val: np.ndarray,
-    y_val: np.ndarray,
-    groups: List[np.ndarray],
-    alpha_min: float,
-    alpha_max: float,
-    alpha_points: int,
-) -> SweepResult:
-    alphas = np.logspace(np.log10(alpha_min), np.log10(alpha_max), alpha_points)
-
-    feature_counts: List[int] = []
-    nmse_db_values: List[float] = []
-    active_indices: List[np.ndarray] = []
-    params: List[Dict[str, float]] = []
-
-    for alpha in alphas:
-        w = group_lasso_fit(h_train, y_train, groups, alpha=alpha)
-        y_pred = h_val @ w
-        nmse_db = nmse_db_real(y_pred, y_val)
-        active_groups = []
-        for g_idx, g_cols in enumerate(groups):
-            if np.linalg.norm(w[g_cols, :]) > 1e-8:
-                active_groups.append(g_idx)
-        feature_counts.append(len(active_groups))
-        nmse_db_values.append(nmse_db)
-        active_indices.append(np.array(active_groups, dtype=int))
-        params.append({"alpha": float(alpha)})
-
-    return SweepResult(
-        feature_counts=feature_counts,
-        nmse_db=nmse_db_values,
-        evm_db=[],
-        aclr_avg_db=[],
-        active_indices=active_indices,
-        model_params=params,
-        flop_counts=[],
-    )
 
 
 def select_at_threshold(result: SweepResult, target_nmse_db: float) -> Tuple[int, np.ndarray, Dict[str, float]]:
@@ -391,97 +268,54 @@ def plot_pareto(
     """
     colors = {"y1": "blue", "y2": "green", "y3": "red"}
     markers = {"y1": "o", "y2": "s", "y3": "^"}
-
-    def plot_metric(
-        x_values: List[float],
-        y_values: List[float],
-        xlabel: str,
-        ylabel: str,
-        title: str,
-        filename: str,
-        set_odd_ticks: bool = False,
-    ) -> None:
-        plt.figure(figsize=(10, 6))
-        for band_name, series in band_results_dict.items():
-            color = colors.get(band_name, "black")
-            marker = markers.get(band_name, "o")
-            plt.plot(
-                x_values(series),
-                y_values(series),
-                f"-{marker}",
-                label=f"BOMP ({band_name})",
-                color=color,
-                markersize=6,
-            )
-        plt.xlabel(xlabel, fontsize=12)
-        plt.ylabel(ylabel, fontsize=12)
-        plt.title(title, fontsize=13)
-        plt.grid(True, alpha=0.3)
-        plt.legend(fontsize=10)
-        if set_odd_ticks:
-            max_groups = max((max(x_values(series)) for series in band_results_dict.values()), default=1)
-            ticks = np.arange(1, int(max_groups) + 1, 2)
-            plt.gca().set_xticks(ticks)
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, filename), dpi=150)
-        plt.close()
     
-    plot_metric(
-        x_values=lambda s: s.feature_counts,
-        y_values=lambda s: s.nmse_db,
-        xlabel="Active Groups",
-        ylabel="NMSE (dB)",
-        title="BOMP Pareto Frontier: NMSE vs Active Groups",
-        filename="pareto_nmse_vs_groups.png",
-        set_odd_ticks=True,
-    )
-
-    plot_metric(
-        x_values=lambda s: s.feature_counts,
-        y_values=lambda s: s.evm_db,
-        xlabel="Active Groups",
-        ylabel="EVM (dB)",
-        title="BOMP Pareto Frontier: EVM vs Active Groups",
-        filename="pareto_evm_vs_groups.png",
-        set_odd_ticks=True,
-    )
-
-    plot_metric(
-        x_values=lambda s: s.feature_counts,
-        y_values=lambda s: s.aclr_avg_db,
-        xlabel="Active Groups",
-        ylabel="ACLR (dB)",
-        title="BOMP Pareto Frontier: ACLR vs Active Groups",
-        filename="pareto_aclr_vs_groups.png",
-        set_odd_ticks=True,
-    )
-
-    plot_metric(
-        x_values=lambda s: s.flop_counts,
-        y_values=lambda s: s.nmse_db,
-        xlabel="Total FLOPs per Sample",
-        ylabel="NMSE (dB)",
-        title="BOMP Pareto Frontier: NMSE vs FLOPs",
-        filename="pareto_nmse_vs_flops.png",
-    )
-
-    plot_metric(
-        x_values=lambda s: s.flop_counts,
-        y_values=lambda s: s.evm_db,
-        xlabel="Total FLOPs per Sample",
-        ylabel="EVM (dB)",
-        title="BOMP Pareto Frontier: EVM vs FLOPs",
-        filename="pareto_evm_vs_flops.png",
-    )
-
-    plot_metric(
-        x_values=lambda s: s.flop_counts,
-        y_values=lambda s: s.aclr_avg_db,
-        xlabel="Total FLOPs per Sample",
-        ylabel="ACLR (dB)",
-        title="BOMP Pareto Frontier: ACLR vs FLOPs",
-        filename="pareto_aclr_vs_flops.png",
-    )
+    # Plot 1: Active Groups vs NMSE
+    plt.figure(figsize=(10, 6))
+    for band_name, bomp_result in band_results_dict.items():
+        color = colors.get(band_name, "black")
+        marker = markers.get(band_name, "o")
+        plt.plot(
+            bomp_result.feature_counts,
+            bomp_result.nmse_db,
+            f"-{marker}",
+            label=f"BOMP ({band_name})",
+            color=color,
+            markersize=6,
+        )
+    
+    plt.xlabel("Active Groups", fontsize=12)
+    plt.ylabel("NMSE (dB)", fontsize=12)
+    plt.title("BOMP Pareto Frontier: NMSE vs Active Groups", fontsize=13)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=10)
+    plt.tight_layout()
+    groups_path = os.path.join(output_dir, "pareto_nmse_vs_groups.png")
+    plt.savefig(groups_path, dpi=150)
+    plt.close()
+    
+    # Plot 2: FLOPs vs NMSE
+    plt.figure(figsize=(10, 6))
+    for band_name, bomp_result in band_results_dict.items():
+        color = colors.get(band_name, "black")
+        marker = markers.get(band_name, "o")
+        plt.plot(
+            bomp_result.flop_counts,
+            bomp_result.nmse_db,
+            f"-{marker}",
+            label=f"BOMP ({band_name})",
+            color=color,
+            markersize=6,
+        )
+    
+    plt.xlabel("Total FLOPs per Sample", fontsize=12)
+    plt.ylabel("NMSE (dB)", fontsize=12)
+    plt.title("BOMP Pareto Frontier: NMSE vs FLOPs", fontsize=13)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=10)
+    plt.tight_layout()
+    flops_path = os.path.join(output_dir, "pareto_nmse_vs_flops.png")
+    plt.savefig(flops_path, dpi=150)
+    plt.close()
 
 
 def load_dataset_keys(path: str, h_key: str, y_key: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -550,24 +384,11 @@ def main() -> None:
         default=None,
         help="Carrier stopbands in Hz, e.g. '-110e6,-90e6;90e6,110e6'.",
     )
-    parser.add_argument(
-        "--metrics_fs",
-        type=float,
-        default=None,
-        help="Sample rate for ACLR/EVM metrics (Hz). Defaults to --fs or 800e6.",
-    )
-    parser.add_argument("--bw_main_ch", type=float, default=200e6, help="Main channel bandwidth for ACLR/EVM (Hz).")
-    parser.add_argument("--n_sub_ch", type=int, default=10, help="Number of sub-channels for ACLR/EVM.")
-    parser.add_argument("--nperseg", type=int, default=2560, help="Segment length for ACLR/EVM FFT.")
     parser.add_argument("--output_dir", default="dpd_out/analysis/basis_selection_BOMP", help="Output directory.")
     args = parser.parse_args()
 
     dataset_name = os.path.basename(args.dataset).split(".")[0]
     args.output_dir = os.path.join(args.output_dir, dataset_name)
-
-    metrics_fs = args.metrics_fs
-    if metrics_fs is None:
-        metrics_fs = args.fs if args.fs is not None else 800e6
 
     target_keys = ["y1", "y2", "y3"]
     num_bands = len(target_keys)
@@ -621,19 +442,7 @@ def main() -> None:
             shuffle=False,
         )
 
-        bomp_result = block_omp_sweep(
-            h_train,
-            y_train,
-            h_val,
-            y_val,
-            groups,
-            memory_depth_M,
-            num_bands,
-            metrics_fs,
-            args.bw_main_ch,
-            args.n_sub_ch,
-            args.nperseg,
-        )
+        bomp_result = block_omp_sweep(h_train, y_train, h_val, y_val, groups, memory_depth_M, num_bands)
         bomp_results_per_band[target_band] = bomp_result  # Store for plotting
 
         bomp_count, bomp_active, bomp_param = select_at_threshold(bomp_result, args.nmse_threshold)

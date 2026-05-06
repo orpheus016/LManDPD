@@ -55,6 +55,15 @@ class CoreModel(nn.Module):
                                  bidirectional=self.bidirectional,
                                  batch_first=self.batch_first,
                                  bias=self.bias)
+        elif backbone_type == 'triband_qgru':
+            self.output_size = 6
+            from backbones.triband_qgru import TriBand_QGRU
+            self.backbone = TriBand_QGRU(hidden_size=self.hidden_size,
+                                         output_size=self.output_size,
+                                         num_layers=self.num_layers,
+                                         bidirectional=self.bidirectional,
+                                         batch_first=self.batch_first,
+                                         bias=self.bias)
         elif backbone_type == 'qgru_amp1':
             from backbones.qgru_amp1 import QGRU
             self.backbone = QGRU(hidden_size=self.hidden_size,

@@ -42,7 +42,7 @@ def get_arguments():
     parser.add_argument('--K', default=4, type=int, help='Degree of GMP model')
     # Power Amplifier Model Settings
     parser.add_argument('--PA_backbone', default='gru',
-                        choices=['gmp','deltagru', 'deltajanet', 'janet', 'fcn', 'gru', 'dgru', 'qgru', 'qgru_amp1', 'lstm', 'vdlstm',
+                        choices=['gmp','deltagru', 'deltajanet', 'janet', 'fcn', 'gru', 'dgru', 'triband_qgru', 'qgru', 'qgru_amp1', 'lstm', 'vdlstm',
                                 'rvtdcnn', 'mamba', 'tcn', 'pntdnn', 'pdgru', 'pgjanet', 'dvrjanet', 'bojanet', 'pnjanet', 'apnrnn', 'djanet',
                                 'tcnn', 'neuraltx', 'mcldnn'],
                         help='Modeling PA Recurrent layer type')
@@ -52,7 +52,7 @@ def get_arguments():
                         help="Number of layers of the PA backbone.")
     # Digital Predistortion Model Settings
     parser.add_argument('--DPD_backbone', default='gru',
-                        choices=['gmp', 'deltagru', 'deltajanet', 'janet', 'snn', 'fcn', 'gru', 'dgru', 'qgru', 'qgru_amp1', 'lstm', 'vdlstm',
+                        choices=['gmp', 'deltagru', 'deltajanet', 'janet', 'snn', 'fcn', 'gru', 'dgru', 'triband_qgru', 'qgru', 'qgru_amp1', 'lstm', 'vdlstm',
                                 'rvtdcnn', 'deltagru_tcnskip', 'tcn', 'pntdnn', 'pdgru', 'pgjanet', 'dvrjanet', 'bojanet', 'pnjanet', 'djanet',
                                 'tcnn', 'neuraltx', 'mcldnn'],
                         help='DPD model Recurrent layer type')
