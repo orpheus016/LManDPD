@@ -28,6 +28,29 @@ def _load_spec(dataset_name: str):
         return json.load(handle)
 
 
+def _infer_dataset_name(csv_path: str, dataset_name_arg: str = None) -> str:
+    if dataset_name_arg:
+        return dataset_name_arg
+    parts = csv_path.replace("\\", "/").split("/")
+    if len(parts) < 3:
+        raise ValueError(f"Cannot infer dataset from path: {csv_path}")
+
+    candidate = parts[-2]
+    spec_path = os.path.join("datasets", candidate, "spec.json")
+    if os.path.exists(spec_path):
+        return candidate
+
+    candidate = parts[-3]
+    spec_path = os.path.join("datasets", candidate, "spec.json")
+    if os.path.exists(spec_path):
+        return candidate
+
+    raise FileNotFoundError(
+        "Dataset spec.json not found for inferred names. "
+        "Provide --dataset_name explicitly."
+    )
+
+
 def _segment_iq(iq: np.ndarray, nperseg: int):
     n_total = iq.shape[0]
     segments = []
@@ -42,9 +65,20 @@ def _segment_iq(iq: np.ndarray, nperseg: int):
     return np.asarray(segments)
 
 
-def _find_pa_checkpoint(dataset_name: str, pa_backbone: str, pa_hidden_size: int, pa_num_layers: int):
+def _select_band(iq: np.ndarray, band: int) -> np.ndarray:
+    if iq.shape[1] == 2:
+        return iq
+    if iq.shape[1] != 6:
+        raise ValueError(f"Expected IQ input with 2 or 6 columns, got {iq.shape[1]}")
+    if band not in (1, 2, 3):
+        raise ValueError("band must be 1, 2, or 3")
+    start = (band - 1) * 2
+    return iq[:, start:start + 2]
+
+
+def _find_pa_checkpoint(dataset_name: str, pa_backbone: str, pa_hidden_size: int, pa_num_layers: int, input_size: int):
     net_pa = model.CoreModel(
-        input_size=2,
+        input_size=input_size,
         hidden_size=pa_hidden_size,
         num_layers=pa_num_layers,
         backbone_type=pa_backbone,
@@ -67,9 +101,10 @@ def _find_pa_checkpoint(dataset_name: str, pa_backbone: str, pa_hidden_size: int
 
 
 def _pa_output_after_dpd(dataset_name: str, dpd_iq: np.ndarray, pa_backbone: str, pa_hidden_size: int, pa_num_layers: int):
-    ckpt = _find_pa_checkpoint(dataset_name, pa_backbone, pa_hidden_size, pa_num_layers)
+    input_size = dpd_iq.shape[1]
+    ckpt = _find_pa_checkpoint(dataset_name, pa_backbone, pa_hidden_size, pa_num_layers, input_size)
     net_pa = model.CoreModel(
-        input_size=2,
+        input_size=input_size,
         hidden_size=pa_hidden_size,
         num_layers=pa_num_layers,
         backbone_type=pa_backbone,
@@ -86,9 +121,11 @@ def _pa_output_after_dpd(dataset_name: str, dpd_iq: np.ndarray, pa_backbone: str
     return pa_out, ckpt
 
 
-def _target_signal(dataset_name: str, input_iq: np.ndarray):
+def _target_signal(dataset_name: str, input_iq: np.ndarray, band: int):
     x_train, y_train, _, _, _, _ = load_dataset(dataset_name=dataset_name)
-    target_gain = set_target_gain(x_train, y_train)
+    x_band = _select_band(x_train, band)
+    y_band = _select_band(y_train, band)
+    target_gain = set_target_gain(x_band, y_band)
     target = target_gain * input_iq
     return target, float(target_gain)
 
@@ -114,16 +151,13 @@ def _psd_for_plot(iq: np.ndarray, fs: float, nperseg: int, smooth_window: int = 
 def _evaluate_file(
     csv_path: str,
     output_dir: str,
+    dataset_name: str,
+    band: int,
     pa_backbone: str,
     pa_hidden_size: int,
     pa_num_layers: int,
     smooth_window: int = 10,
 ):
-    parts = csv_path.replace("\\", "/").split("/")
-    if len(parts) < 3:
-        raise ValueError(f"Cannot infer dataset from path: {csv_path}")
-    dataset_name = parts[-2]
-
     spec = _load_spec(dataset_name)
     fs = spec["input_signal_fs"]
     bw_main_ch = spec["bw_main_ch"]
@@ -131,22 +165,33 @@ def _evaluate_file(
     nperseg = spec["nperseg"]
 
     frame = pd.read_csv(csv_path)
-    required_cols = ["I", "Q", "I_dpd", "Q_dpd"]
-    for col in required_cols:
-        if col not in frame.columns:
-            raise ValueError(f"Missing column '{col}' in {csv_path}")
+    triband_in_cols = ["I1", "Q1", "I2", "Q2", "I3", "Q3"]
+    triband_out_cols = ["I1_dpd", "Q1_dpd", "I2_dpd", "Q2_dpd", "I3_dpd", "Q3_dpd"]
+    if all(col in frame.columns for col in triband_in_cols + triband_out_cols):
+        original_iq_full = frame[triband_in_cols].to_numpy(dtype=np.float64)
+        dpd_iq_full = frame[triband_out_cols].to_numpy(dtype=np.float64)
+        original_iq = _select_band(original_iq_full, band)
+        dpd_iq = _select_band(dpd_iq_full, band)
+    else:
+        required_cols = ["I", "Q", "I_dpd", "Q_dpd"]
+        for col in required_cols:
+            if col not in frame.columns:
+                raise ValueError(f"Missing column '{col}' in {csv_path}")
+        original_iq = frame[["I", "Q"]].to_numpy(dtype=np.float64)
+        dpd_iq = frame[["I_dpd", "Q_dpd"]].to_numpy(dtype=np.float64)
+        original_iq_full = original_iq
+        dpd_iq_full = dpd_iq
 
-    original_iq = frame[["I", "Q"]].to_numpy(dtype=np.float64)
-    dpd_iq = frame[["I_dpd", "Q_dpd"]].to_numpy(dtype=np.float64)
-
-    pa_after_dpd_iq, pa_ckpt = _pa_output_after_dpd(
+    pa_after_dpd_full, pa_ckpt = _pa_output_after_dpd(
         dataset_name=dataset_name,
-        dpd_iq=dpd_iq,
+        dpd_iq=dpd_iq_full,
         pa_backbone=pa_backbone,
         pa_hidden_size=pa_hidden_size,
         pa_num_layers=pa_num_layers,
     )
-    target_iq, target_gain = _target_signal(dataset_name=dataset_name, input_iq=original_iq)
+    target_iq, target_gain = _target_signal(dataset_name=dataset_name, input_iq=original_iq, band=band)
+
+    pa_after_dpd_iq = _select_band(pa_after_dpd_full, band)
 
     pred_segments = _segment_iq(pa_after_dpd_iq, nperseg=nperseg)
     gt_segments = _segment_iq(target_iq, nperseg=nperseg)
@@ -192,6 +237,7 @@ def _evaluate_file(
 
     return {
         "dataset": dataset_name,
+        "band": int(band),
         "file": csv_path.replace("\\", "/"),
         "metric_scope": "pa_after_dpd_vs_target",
         "pa_checkpoint": pa_ckpt.replace("\\", "/"),
@@ -242,6 +288,17 @@ def main():
         default=10,
         help="PSD smoothing window size.",
     )
+    parser.add_argument(
+        "--dataset_name",
+        default=None,
+        help="Dataset name under ./datasets (used to load spec.json and PA checkpoint).",
+    )
+    parser.add_argument(
+        "--band",
+        default="1",
+        choices=["1", "2", "3", "all"],
+        help="Which band to evaluate for triband CSVs. Use 'all' to evaluate bands 1..3.",
+    )
     parser.add_argument("--PA_backbone", default="dgru", help="PA backbone used for PA checkpoint loading.")
     parser.add_argument("--PA_hidden_size", type=int, default=23, help="PA hidden size.")
     parser.add_argument("--PA_num_layers", type=int, default=1, help="PA number of layers.")
@@ -253,20 +310,28 @@ def main():
 
     results = []
     for csv_path in files:
-        result = _evaluate_file(
-            csv_path,
-            output_dir=args.output_dir,
-            pa_backbone=args.PA_backbone,
-            pa_hidden_size=args.PA_hidden_size,
-            pa_num_layers=args.PA_num_layers,
-            smooth_window=args.smooth_window,
-        )
-        results.append(result)
-        print(
-            f"[{result['dataset']}] {os.path.basename(csv_path)} | "
-            f"NMSE={result['nmse_db']:.3f} dB, EVM={result['evm_db']:.3f} dB, "
-            f"ACLR(avg)={result['aclr_avg_db']:.3f} dB"
-        )
+        dataset_name = _infer_dataset_name(csv_path, args.dataset_name)
+        if args.band == "all":
+            bands = [1, 2, 3]
+        else:
+            bands = [int(args.band)]
+        for band in bands:
+            result = _evaluate_file(
+                csv_path,
+                output_dir=args.output_dir,
+                dataset_name=dataset_name,
+                band=band,
+                pa_backbone=args.PA_backbone,
+                pa_hidden_size=args.PA_hidden_size,
+                pa_num_layers=args.PA_num_layers,
+                smooth_window=args.smooth_window,
+            )
+            results.append(result)
+            print(
+                f"[{result['dataset']}|band{result['band']}] {os.path.basename(csv_path)} | "
+                f"NMSE={result['nmse_db']:.3f} dB, EVM={result['evm_db']:.3f} dB, "
+                f"ACLR(avg)={result['aclr_avg_db']:.3f} dB"
+            )
 
     summary = pd.DataFrame(results)
     os.makedirs(args.output_dir, exist_ok=True)

@@ -44,7 +44,7 @@ def get_arguments():
     parser.add_argument('--PA_backbone', default='gru',
                         choices=['gmp','deltagru', 'deltajanet', 'janet', 'fcn', 'gru', 'dgru', 'triband_qgru', 'qgru', 'qgru_amp1', 'lstm', 'vdlstm',
                                 'rvtdcnn', 'mamba', 'tcn', 'pntdnn', 'pdgru', 'pgjanet', 'dvrjanet', 'bojanet', 'pnjanet', 'apnrnn', 'djanet',
-                                'tcnn', 'neuraltx', 'mcldnn'],
+                                'tcnn', 'neuraltx', 'mcldnn', 'triband_bdomp_tdnn'],
                         help='Modeling PA Recurrent layer type')
     parser.add_argument('--PA_hidden_size', default=23, type=int,
                         help='Hidden size of PA backbone')
@@ -54,7 +54,7 @@ def get_arguments():
     parser.add_argument('--DPD_backbone', default='gru',
                         choices=['gmp', 'deltagru', 'deltajanet', 'janet', 'snn', 'fcn', 'gru', 'dgru', 'triband_qgru', 'qgru', 'qgru_amp1', 'lstm', 'vdlstm',
                                 'rvtdcnn', 'deltagru_tcnskip', 'tcn', 'pntdnn', 'pdgru', 'pgjanet', 'dvrjanet', 'bojanet', 'pnjanet', 'djanet',
-                                'tcnn', 'neuraltx', 'mcldnn'],
+                                'tcnn', 'neuraltx', 'mcldnn', 'triband_bdomp_tdnn'],
                         help='DPD model Recurrent layer type')
     parser.add_argument('--DPD_hidden_size', default=15, type=int, help='Hidden size of DPD backbone.')
     parser.add_argument('--DPD_num_layers', default=1, type=int, help='Number of layers of the DPD backbone.')
