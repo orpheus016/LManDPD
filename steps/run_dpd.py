@@ -97,7 +97,21 @@ def main(proj: Project):
     if not os.path.exists(path_dpd_model):
         raise FileNotFoundError(f"DPD model not found at {path_dpd_model}")
     
-    net_dpd.load_state_dict(torch.load(path_dpd_model))
+    state_dict = torch.load(path_dpd_model)
+    remap = {
+        "backbone.add.": "backbone.feature_extractor.add.",
+        "backbone.mul.": "backbone.feature_extractor.mul.",
+    }
+    # Remap quantized op keys after feature extractor refactor.
+    remapped_state = {}
+    for key, value in state_dict.items():
+        new_key = key
+        for old_prefix, new_prefix in remap.items():
+            if key.startswith(old_prefix):
+                new_key = new_prefix + key[len(old_prefix):]
+                break
+        remapped_state[new_key] = value
+    net_dpd.load_state_dict(remapped_state)
 
     # Get parameter count
     n_net_params = count_net_params(net_dpd)
