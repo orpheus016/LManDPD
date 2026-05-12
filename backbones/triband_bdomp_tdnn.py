@@ -21,7 +21,7 @@ class TriBand_BDOMP_TDNN(nn.Module):
         self.in_features = self.feature_extractor.num_features * self.tap_size
         self.fc_hidden = nn.Linear(self.in_features, hidden_size, bias=True)
         self.act = nn.Tanh()
-        self.fc_out = nn.Linear(hidden_size, 6, bias=True)
+        self.fc_out = nn.Linear(self.in_features + hidden_size, 6, bias=True)
 
     @classmethod
     def apply_unstructured_pruning(cls, model, amount=0.75):
@@ -38,7 +38,9 @@ class TriBand_BDOMP_TDNN(nn.Module):
         windows = x_pad.unfold(dimension=1, size=self.tap_size, step=1)
         windows = windows.contiguous().view(-1, self.in_features)
 
-        out = self.act(self.fc_hidden(windows))
-        out = self.fc_out(out)
+        out_hidden = self.act(self.fc_hidden(windows))
+        out_concat = torch.cat((windows, out_hidden), dim=-1)
+        out = self.fc_out(out_concat)
+        
         out = out.view(batch_size, frame_length, 6)
         return out
