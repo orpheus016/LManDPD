@@ -1,0 +1,2 @@
+dataset,n_samples,sample_rate_hz,nperseg,spectrum_plot,constellation_plot,amam_plot,ampm_plot
+APA_200MHz,98304,983040000.0,19662,datasets/APA_200MHz/signal_analysis/spectrum_analyzer_psd.png,datasets/APA_200MHz/signal_analysis/iq_constellation.png,datasets/APA_200MHz/signal_analysis/amam.png,datasets/APA_200MHz/signal_analysis/ampm.png
