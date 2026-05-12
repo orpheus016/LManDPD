@@ -23,7 +23,11 @@ class CoreModel(nn.Module):
         self.bidirectional = False
         self.bias = True
 
-        if backbone_type == 'gmp':
+        if backbone_type == 'triband_bdomp_tdnn':
+            self.output_size = 6
+            from backbones.triband_bdomp_tdnn import TriBand_BDOMP_TDNN
+            self.backbone = TriBand_BDOMP_TDNN(hidden_size=self.hidden_size)
+        elif backbone_type == 'gmp':
             from backbones.gmp import GMP
             self.backbone = GMP()
         elif backbone_type == 'gru':
@@ -51,6 +55,15 @@ class CoreModel(nn.Module):
                                  bidirectional=self.bidirectional,
                                  batch_first=self.batch_first,
                                  bias=self.bias)
+        elif backbone_type == 'triband_qgru':
+            self.output_size = 6
+            from backbones.triband_qgru import TriBand_QGRU
+            self.backbone = TriBand_QGRU(hidden_size=self.hidden_size,
+                                         output_size=self.output_size,
+                                         num_layers=self.num_layers,
+                                         bidirectional=self.bidirectional,
+                                         batch_first=self.batch_first,
+                                         bias=self.bias)
         elif backbone_type == 'qgru_amp1':
             from backbones.qgru_amp1 import QGRU
             self.backbone = QGRU(hidden_size=self.hidden_size,

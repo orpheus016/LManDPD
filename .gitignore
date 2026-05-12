@@ -46,6 +46,7 @@ log/
 save/
 #dataset
 datasets/RFWebLab_PA_200MHz
+datasets/RFWebLab_PA_200MHz_Isolated
 
 # Allow sample data but not large datasets
 datasets/**/data/*.csv
