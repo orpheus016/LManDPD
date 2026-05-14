@@ -3,6 +3,8 @@ import glob
 import json
 import os
 import sys
+import scipy.signal
+import math
 
 import numpy as np
 import pandas as pd
@@ -104,19 +106,53 @@ def _get_fc_list(spec: dict) -> list:
     raise KeyError("fc1_hz/fc2_hz/fc3_hz not found in spec.json")
 
 
-def _wideband_psd_for_plot(iq_full: np.ndarray, fs: float, nperseg: int, smooth_window: int, fc_list: list):
+def _wideband_psd_for_plot(iq_full: np.ndarray, baseband_fs: float, wideband_fs: float, nperseg: int, smooth_window: int, fc_list: list):
     if iq_full.shape[1] != 6:
         raise ValueError("wideband PSD requires 6-column IQ input")
-    n_total = iq_full.shape[0]
-    t = np.arange(n_total) / fs
-    wideband = np.zeros(n_total, dtype=np.complex128)
-    for idx, fc in enumerate(fc_list):
+    
+    n_total_baseband = iq_full.shape[0]
+    
+    # FIX 1: Map absolute carrier frequencies to relative baseband offsets 
+    # to prevent catastrophic aliasing when mixing.
+    fc_center = (max(fc_list) + min(fc_list)) / 2.0
+    fc_offsets = [fc - fc_center for fc in fc_list]
+    
+    # FIX 2: Compute exact integer up/down ratios for polyphase resampling
+    # (Using 1000 Hz scaling as telecom sample rates are usually exact in kHz)
+    up = int(round(wideband_fs / 1000))
+    down = int(round(baseband_fs / 1000))
+    g = math.gcd(up, down)
+    up //= g
+    down //= g
+    
+    n_total_wideband = int(n_total_baseband * (up / down))
+    t = np.arange(n_total_wideband) / wideband_fs
+    wideband = np.zeros(n_total_wideband, dtype=np.complex128)
+    
+    for idx, offset in enumerate(fc_offsets):
         band = iq_full[:, idx * 2: idx * 2 + 2]
         complex_band = band[:, 0] + 1j * band[:, 1]
-        wideband += complex_band * np.exp(1j * 2.0 * np.pi * fc * t)
+        
+        # FIX 3: Use resample_poly instead of resample. 
+        # Standard resample uses FFT and assumes periodic boundaries, 
+        # causing edge artifacts that severely distort the PSD noise floor.
+        complex_band_up = scipy.signal.resample_poly(complex_band, up, down)
+        
+        # Ensure lengths match due to slight polyphase filter edge trimming
+        min_len = min(len(complex_band_up), len(wideband))
+        
+        # Shift using the RELATIVE offset
+        wideband[:min_len] += complex_band_up[:min_len] * np.exp(1j * 2.0 * np.pi * offset * t[:min_len])
 
-    freq, psd = metrics.power_spectrum(wideband.reshape(1, -1), fs=fs, nperseg=nperseg, axis=-1)
+    # FIX 4: Scale nperseg so the Welch frequency bins maintain the same 
+    # Hz/bin resolution as your single-band plots.
+    nperseg_wideband = int(nperseg * (wideband_fs / baseband_fs))
+
+    freq, psd = metrics.power_spectrum(wideband.reshape(1, -1), fs=wideband_fs, nperseg=nperseg_wideband, axis=-1)
     psd_norm = 10 * np.log10(psd / np.max(psd))
+
+    freq = np.fft.fftshift(freq)
+    psd_norm = np.fft.fftshift(psd_norm)
 
     if smooth_window > 1:
         psd_smoothed = metrics.moving_average(psd_norm, smooth_window)
@@ -126,10 +162,127 @@ def _wideband_psd_for_plot(iq_full: np.ndarray, fs: float, nperseg: int, smooth_
             freq_adj = freq[trim_left:]
         else:
             freq_adj = freq[trim_left:-trim_right]
-        return freq_adj, psd_smoothed
+        return freq_adj, psd_smoothed, wideband
 
-    return freq, psd_norm
+    return freq, psd_norm, wideband
 
+def extract_constellation_symbols(iq_complex: np.ndarray, spec: dict):
+    """
+    Extracts frequency-domain constellation symbols from whatever time-domain 
+    OFDM IQ data is available, symbol-by-symbol.
+    """
+    acq = spec.get("acquisition", {})
+    nfft = int(acq.get("nfft", 1024))
+    cp_len = int(acq.get("cp_len", 72))
+    cp_len_first = int(acq.get("cp_len_first", 80))
+    symbols_per_slot = int(acq.get("nr_symbols_per_slot", 14))
+
+    symbols = []
+    idx = 0
+    sym_idx = 0
+
+    # March through the array until we run out of samples
+    while True:
+        # The first symbol in a slot has a slightly longer CP
+        current_cp = cp_len_first if (sym_idx % symbols_per_slot) == 0 else cp_len
+        
+        # If we don't have enough samples left for another full symbol, stop!
+        if idx + current_cp + nfft > len(iq_complex):
+            break
+            
+        # 1. Slice out the useful symbol time (skip the Cyclic Prefix)
+        sym_time = iq_complex[idx + current_cp : idx + current_cp + nfft]
+        
+        # 2. Convert to frequency domain using FFT
+        sym_freq = np.fft.fftshift(np.fft.fft(sym_time))
+        
+        # 3. Extract active subcarriers (grab the middle 60% to avoid empty guard bands)
+        active_carriers = sym_freq[int(nfft * 0.2) : int(nfft * 0.8)]
+        symbols.append(active_carriers)
+        
+        # Move our index forward to the start of the next symbol
+        idx += (current_cp + nfft)
+        sym_idx += 1
+
+    if not symbols:
+        print(f"Warning: Signal length ({len(iq_complex)}) is too short to extract even ONE symbol of length {nfft + cp_len_first}.")
+        return np.array([]) 
+
+    # Flatten into a single 1D array
+    syms_out = np.concatenate(symbols)
+    
+    # Normalize the power to 1.0 so it scales perfectly into your [-1.6, 1.6] plot window
+    rms = np.sqrt(np.mean(np.abs(syms_out)**2))
+    if rms > 0:
+        syms_out = syms_out / rms
+        
+    return syms_out
+
+def _plot_constellation(syms_in, syms_out, output_path, label_prefix="Band 1"):
+    """Equivalent to the MATLAB Constellation subplot using regular plt."""
+    fig = plt.figure(figsize=(10, 5))
+    
+    # --- Input Constellation (Left) ---
+    plt.subplot(1, 2, 1)
+    plt.plot(syms_in.real, syms_in.imag, 'k.', markersize=2, alpha=0.5)
+    plt.xlim([-1.6, 1.6])
+    plt.ylim([-1.6, 1.6])
+    plt.gca().set_aspect('equal', adjustable='box')  # Python's equivalent to 'axis square'
+    plt.grid(True)
+    plt.title(f'Input Constellation ({label_prefix})')
+    plt.xlabel('I')
+    plt.ylabel('Q')
+    
+    # --- PA Output Constellation (Right) ---
+    plt.subplot(1, 2, 2)
+    plt.plot(syms_out.real, syms_out.imag, 'b.', markersize=2, alpha=0.5)
+    plt.xlim([-1.6, 1.6])
+    plt.ylim([-1.6, 1.6])
+    plt.gca().set_aspect('equal', adjustable='box')
+    plt.grid(True)
+    plt.title(f'PA Output Constellation ({label_prefix})')
+    plt.xlabel('I')
+    plt.ylabel('Q')
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def _plot_am_am_pm(x_complex, y_complex, output_path, label_prefix="Band 1"):
+    """Equivalent to the MATLAB AM-AM and AM-PM subplot using regular plt."""
+    abs_x = np.abs(x_complex)
+    abs_y = np.abs(y_complex)
+    
+    # Calculate phase difference in degrees
+    phase_diff = np.angle(y_complex * np.conj(x_complex), deg=True)
+    mx = np.max(abs_x)
+    
+    fig = plt.figure(figsize=(12, 5))
+    
+    # --- AM-AM (Left) ---
+    plt.subplot(1, 2, 1)
+    plt.plot(abs_x, abs_y, '.', markersize=2, label='Measured', alpha=0.3)
+    plt.plot([0, mx], [0, mx], 'k--', linewidth=1.2, label='Ideal Linear')
+    plt.xlabel('|x|')
+    plt.ylabel('|y_{eq}|')
+    plt.title(f'AM-AM ({label_prefix})')
+    plt.grid(True)
+    plt.legend(loc='best')
+    
+    # --- AM-PM (Right) ---
+    plt.subplot(1, 2, 2)
+    plt.plot(abs_x, phase_diff, '.', markersize=2, label='Measured', alpha=0.3)
+    plt.plot([0, mx], [0, 0], 'k--', linewidth=1.2, label='Ideal Linear')
+    plt.xlabel('|x|')
+    plt.ylabel(r'$\Delta\phi$ (deg)')
+    plt.title(f'AM-PM ({label_prefix}, Corrected)')
+    plt.grid(True)
+    plt.legend(loc='best')
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close(fig)
 
 def _find_pa_checkpoint(dataset_name: str, pa_backbone: str, pa_hidden_size: int, pa_num_layers: int, input_size: int):
     net_pa = model.CoreModel(
@@ -198,9 +351,24 @@ def _target_signal(input_iq: np.ndarray, target_gains: list, band: int):
     return target, float(gain)
 
 
-def _psd_for_plot(iq: np.ndarray, fs: float, nperseg: int, smooth_window: int = 10):
+def _psd_for_plot(iq: np.ndarray, baseband_fs: float, target_fs: float, nperseg: int, smooth_window: int = 10):
     complex_signal = iq[:, 0] + 1j * iq[:, 1]
-    freq, psd = metrics.power_spectrum(complex_signal.reshape(1, -1), fs=fs, nperseg=nperseg, axis=-1)
+    
+    # 1. Calculate exact integer up/down ratios for polyphase resampling
+    up = int(round(target_fs / 1000))
+    down = int(round(baseband_fs / 1000))
+    g = math.gcd(up, down)
+    up //= g
+    down //= g
+    
+    # 2. Upsample the baseband signal so it physically spans the wider bandwidth
+    complex_up = scipy.signal.resample_poly(complex_signal, up, down)
+    
+    # 3. Scale nperseg to maintain the exact same Hz/bin resolution
+    nperseg_up = int(nperseg * (target_fs / baseband_fs))
+    
+    # 4. Calculate PSD using the target_fs (e.g., 200 MHz)
+    freq, psd = metrics.power_spectrum(complex_up.reshape(1, -1), fs=target_fs, nperseg=nperseg_up, axis=-1)
     psd_norm = 10 * np.log10(psd / np.max(psd))
 
     if smooth_window > 1:
@@ -280,7 +448,9 @@ def _evaluate_file(
     smooth_window: int = 10,
 ):
     spec = _load_spec(dataset_name)
-    fs = spec["input_signal_fs"]
+    fs = spec["input_signal_fs"]    
+    baseband_fs = spec["acquisition"]["fs_bb_hz"] 
+    wideband_fs_spec = spec["input_signal_fs"] 
     bw_main_ch = spec["bw_main_ch"]
     n_sub_ch = spec["n_sub_ch"]
     nperseg = spec["nperseg"]
@@ -323,34 +493,81 @@ def _evaluate_file(
         n_sub_ch=n_sub_ch,
     )
     aclr_avg_db = float((aclr_l_db + aclr_r_db) / 2.0)
+    
+    os.makedirs(output_dir, exist_ok=True)
+    base_name = os.path.splitext(os.path.basename(csv_path))[0]
 
     if psd_mode == "wideband" and is_triband:
         fc_list = _get_fc_list(spec)
-        psd_fs = wideband_fs if wideband_fs is not None else fs
+        psd_fs = wideband_fs if wideband_fs is not None else wideband_fs_spec
         target_iq_full = original_iq_full.copy()
+        
         for idx in range(3):
             band_gain = target_gains[idx]
             target_iq_full[:, idx * 2: idx * 2 + 2] *= band_gain
-        freq_ref, psd_ref = _wideband_psd_for_plot(target_iq_full, fs=psd_fs, nperseg=nperseg, smooth_window=smooth_window, fc_list=fc_list)
-        freq_dpd, psd_dpd = _wideband_psd_for_plot(pa_after_dpd_full, fs=psd_fs, nperseg=nperseg, smooth_window=smooth_window, fc_list=fc_list)
+            
+        # Catch the newly returned wb_target and wb_dpd arrays
+        freq_ref, psd_ref, wb_target = _wideband_psd_for_plot(target_iq_full, baseband_fs=baseband_fs, wideband_fs=psd_fs, nperseg=nperseg, smooth_window=smooth_window, fc_list=fc_list)
+        freq_dpd, psd_dpd, wb_dpd = _wideband_psd_for_plot(pa_after_dpd_full, baseband_fs=baseband_fs, wideband_fs=psd_fs, nperseg=nperseg, smooth_window=smooth_window, fc_list=fc_list)
         psd_label = "wideband"
+        
+        # --- WIDEBAND AM-AM / AM-PM ---
+        am_pm_path = os.path.join(output_dir, f"{dataset_name}__{base_name}__ampm_wideband.png")
+        _plot_am_am_pm(wb_target, wb_dpd, am_pm_path, label_prefix="Wideband")
+        
+        # --- WIDEBAND CONSTELLATION ---
+        # Extract and combine symbols from ALL 3 bands into one master array
+        all_syms_in, all_syms_out = [], []
+        for i in range(3):
+            b_target = target_iq_full[:, i*2] + 1j * target_iq_full[:, i*2+1]
+            b_dpd = pa_after_dpd_full[:, i*2] + 1j * pa_after_dpd_full[:, i*2+1]
+            all_syms_in.append(extract_constellation_symbols(b_target, spec))
+            all_syms_out.append(extract_constellation_symbols(b_dpd, spec))
+            
+        syms_in = np.concatenate(all_syms_in)
+        syms_out = np.concatenate(all_syms_out)
+        if len(syms_in) > 0 and len(syms_out) > 0:
+            const_path = os.path.join(output_dir, f"{dataset_name}__{base_name}__const_wideband.png")
+            _plot_constellation(syms_in, syms_out, const_path, label_prefix="Wideband (All Bands)")
+            
     else:
-        freq_ref, psd_ref = _psd_for_plot(target_iq, fs=fs, nperseg=nperseg, smooth_window=smooth_window)
-        freq_dpd, psd_dpd = _psd_for_plot(pa_after_dpd_iq, fs=fs, nperseg=nperseg, smooth_window=smooth_window)
+        freq_ref, psd_ref = _psd_for_plot(target_iq, baseband_fs=baseband_fs, target_fs=fs, nperseg=nperseg, smooth_window=smooth_window)
+        freq_dpd, psd_dpd = _psd_for_plot(pa_after_dpd_iq, baseband_fs=baseband_fs, target_fs=fs, nperseg=nperseg, smooth_window=smooth_window)
         psd_label = f"band{band}"
 
-    fig = plt.figure(figsize=(10, 6))
-    plt.plot(freq_ref / 1e6, psd_ref, label="Target (gain * input)", linewidth=1.5)
-    plt.plot(freq_dpd / 1e6, psd_dpd, label="PA output after DPD", linestyle="--", linewidth=1.5)
-    plt.title(f"Normalized PSD ({psd_label}): {os.path.basename(csv_path)}")
-    plt.xlabel("Frequency (MHz)")
-    plt.ylabel("Normalized PSD (dB)")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
+        # --- SINGLE BAND AM-AM / AM-PM ---
+        complex_target = target_iq[:, 0] + 1j * target_iq[:, 1]
+        complex_dpd_out = pa_after_dpd_iq[:, 0] + 1j * pa_after_dpd_iq[:, 1]
+        
+        am_pm_path = os.path.join(output_dir, f"{dataset_name}__{base_name}__ampm_band{band}.png")
+        _plot_am_am_pm(complex_target, complex_dpd_out, am_pm_path, label_prefix=f"Band {band}")
 
-    os.makedirs(output_dir, exist_ok=True)
-    base_name = os.path.splitext(os.path.basename(csv_path))[0]
+        # --- SINGLE BAND CONSTELLATION ---
+        syms_in = extract_constellation_symbols(complex_target, spec)
+        syms_out = extract_constellation_symbols(complex_dpd_out, spec)
+        if len(syms_in) > 0 and len(syms_out) > 0:
+            const_path = os.path.join(output_dir, f"{dataset_name}__{base_name}__const_band{band}.png")
+            _plot_constellation(syms_in, syms_out, const_path, label_prefix=f"Band {band}")
+
+
+    # --- PSD PLOTTING (Applies to both) ---
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(freq_ref / 1e6, psd_ref, label="Target (gain * input)", linewidth=1.5)
+    ax.plot(freq_dpd / 1e6, psd_dpd, label="PA output after DPD", linestyle="--", linewidth=1.5)
+
+    if psd_mode == "wideband" and is_triband:
+        ax.set_xlim(-100, 100)
+    else:
+        ax.set_xlim(-30, 30)
+        ax.set_ylim(-60, 0) 
+
+    ax.set_title(f"Normalized PSD ({psd_label}): {os.path.basename(csv_path)}")
+    ax.set_xlabel("Frequency (MHz)")
+    ax.set_ylabel("Normalized PSD (dB)")
+    ax.grid(True)
+    ax.legend()
+    fig.tight_layout()
+
     plot_path = os.path.join(output_dir, f"{dataset_name}__{base_name}__psd_{psd_label}.png")
     plt.savefig(plot_path, dpi=150)
     plt.close(fig)

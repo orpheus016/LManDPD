@@ -8,7 +8,8 @@ use matlab to get the PA data from RFWebLab
 
 run band separation like usual run python
 ```bash
-python utils/band_separation.py --mode triband_csv --input_dir datasets/RFWebLab_PA_200MHz_Isolated
+# switch to isolate from triband_csv
+python utils/band_separation.py --mode isolate --input_dir datasets/RFWebLab_PA_200MHz_Isolated
 ```
 
 run this on the basis_selection.py
@@ -61,4 +62,4 @@ if only want one band (ex: band 3) then
 python utils/compare_dpd_outputs.py --inputs "dpd_out/q14/DPD_*.csv" --output_dir "dpd_out/analysis/tdnn_after_dpd" --PA_backbone triband_qgru --PA_hidden_size 23 --PA_num_layers 1 --dataset_name RFWebLab_PA_200MHz_Isolated --band 3
 ```
 
-check the analysis in dpd_out/analysis/tdnn_after_dpd
+check the analysis in dpd_out/analysis/tdnn_after_dpd  

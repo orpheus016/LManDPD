@@ -85,5 +85,7 @@ def get_arguments():
     parser.add_argument('--window_size', default=4, type=int,
                         help='Window size for magnitude history in PNJANET')
 
-
+    parser.add_argument("--band", default="1",
+                         choices=["1", "2", "3", "all"],
+                help="Which band to evaluate for triband CSVs. Use 'all' to evaluate bands 1..3.",)
     return parser.parse_args()
